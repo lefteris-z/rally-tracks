@@ -11,6 +11,7 @@
    "corpora": [
       {
          "name": "documents",
+		"base-url": "https://raw.githubusercontent.com/lefteris-z/rally-tracks/training-tutorial/training-rally",
          "documents": [
             {
               "source-file": "documents.json.bz2",
