@@ -1,0 +1,184 @@
+{% set p_source = source | default("index") %}
+{% set p_sizes = sizes | default([1, 10, 100, 1000, 10000]) %}
+{% set p_inference_id = inference_id | default(".multilingual-e5-small-elasticsearch") %}
+{% set p_index = index_name | default("msmarco_local") %}
+{% set p_dataset = dataset | default("msmarco_s3") %}
+{% set p_data_source = data_source | default("msmarco_src") %}
+{% set p_from = p_index if p_source == "index" else p_dataset %}
+{
+  "version": 2,
+  "description": "ES|QL DENSE_VECTOR embedding cost over msmarco-v2 passages read from an index or from an S3 dataset",
+  {% if p_source == "index" %}
+  "indices": [
+    {
+      "name": "{{ p_index }}",
+      "body": "index.json"
+    }
+  ],
+  "corpora": [
+    {
+      "name": "msmarco-10k",
+      "base-url": "{{ corpus_base_url | default('s3://lz-esql-dense-vector-eu-central-1/msmarco/10k/ndjson') }}",
+      "documents": [
+        {
+          "source-file": "msmarco_10k.ndjson",
+          "document-count": 10000,
+          "uncompressed-bytes": 3275503,
+          "target-index": "{{ p_index }}"
+        }
+      ]
+    }
+  ],
+  {% endif %}
+  "challenges": [
+    {
+      "name": "embed",
+      "default": true,
+      "description": "FROM <source> | LIMIT n | DENSE_VECTOR emb = text | KEEP id, emb for each n in sizes, one client",
+      "schedule": [
+        {
+          "operation": {
+            "name": "raise-dense-vector-limit",
+            "operation-type": "put-settings",
+            "body": {
+              "persistent": {
+                "esql.command.dense_vector.limit": {{ p_sizes | max }}
+              }
+            }
+          }
+        },
+        {% if p_source == "index" %}
+        {
+          "operation": {
+            "name": "delete-index",
+            "operation-type": "delete-index"
+          }
+        },
+        {
+          "operation": {
+            "name": "create-index",
+            "operation-type": "create-index"
+          }
+        },
+        {
+          "operation": {
+            "name": "check-cluster-health",
+            "operation-type": "cluster-health",
+            "request-params": {
+              "wait_for_status": "green"
+            },
+            "retry-until-success": true
+          }
+        },
+        {
+          "operation": {
+            "name": "index-documents",
+            "operation-type": "bulk",
+            "bulk-size": {{ bulk_size | default(1000) }}
+          },
+          "clients": 1
+        },
+        {
+          "operation": {
+            "name": "refresh-after-index",
+            "operation-type": "refresh"
+          }
+        },
+        {% else %}
+        {
+          "operation": {
+            "name": "enable-managed-identity",
+            "operation-type": "put-settings",
+            "body": {
+              "persistent": {
+                "esql.external.managed_identity.enabled": true
+              }
+            }
+          }
+        },
+        {
+          "operation": {
+            "name": "delete-dataset",
+            "operation-type": "raw-request",
+            "method": "DELETE",
+            "path": "/_query/dataset/{{ p_dataset }}",
+            "ignore": [404],
+            "include-in-reporting": false
+          }
+        },
+        {
+          "operation": {
+            "name": "delete-data-source",
+            "operation-type": "raw-request",
+            "method": "DELETE",
+            "path": "/_query/data_source/{{ p_data_source }}",
+            "ignore": [404],
+            "include-in-reporting": false
+          }
+        },
+        {
+          "operation": {
+            "name": "put-data-source",
+            "operation-type": "raw-request",
+            "method": "PUT",
+            "path": "/_query/data_source/{{ p_data_source }}",
+            "body": {
+              "type": "s3",
+              "settings": {
+                "auth": "managed_identity"
+              }
+            },
+            "include-in-reporting": false
+          }
+        },
+        {
+          "operation": {
+            "name": "put-dataset",
+            "operation-type": "raw-request",
+            "method": "PUT",
+            "path": "/_query/dataset/{{ p_dataset }}",
+            "body": {
+              "data_source": "{{ p_data_source }}",
+              "resource": "{{ dataset_resource | default('s3://lz-esql-dense-vector-eu-central-1/msmarco/10k/parquet/msmarco_10k.parquet') }}",
+              "settings": {
+                "region": "{{ s3_region | default('eu-central-1') }}"
+              }
+            },
+            "include-in-reporting": false
+          }
+        },
+        {% endif %}
+        {
+          "operation": {
+            "name": "warm-up-inference-endpoint",
+            "operation-type": "retryable-raw-request",
+            "method": "POST",
+            "path": "/_inference/text_embedding/{{ p_inference_id }}",
+            "body": {
+              "input": ["warm up"]
+            },
+            "request-timeout": 300,
+            "retries": {{ warm_up_retries | default(60) }},
+            "retry-on-error": true,
+            "retry-wait-period": 10,
+            "include-in-reporting": false
+          }
+        },
+        {% for n in p_sizes %}
+        {
+          "operation": {
+            "name": "embed-{{ n }}",
+            "operation-type": "esql",
+            "query": "FROM {{ p_from }} | LIMIT {{ n }} | DENSE_VECTOR emb = text WITH {\"inference_id\": \"{{ p_inference_id }}\"} | KEEP id, emb",
+            "detailed-results": true,
+            "request-timeout": {{ request_timeout | default(600) }}
+          },
+          "clients": 1,
+          "warmup-iterations": {{ warmup_iterations | default(2) }},
+          "iterations": {{ iterations | default(10) }}
+        }{{ "," if not loop.last }}
+        {% endfor %}
+      ]
+    }
+  ]
+}
