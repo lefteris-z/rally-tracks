@@ -31,10 +31,15 @@
   ],
   {% endif %}
   "challenges": [
+    {% for challenge_name, with_profile in [("embed", false), ("embed-profiled", true)] %}
     {
-      "name": "embed",
-      "default": true,
+      "name": "{{ challenge_name }}",
+      "default": {{ "false" if with_profile else "true" }},
+      {% if with_profile %}
+      "description": "embed, plus profile warm-up and profile_iterations runs of each size with the ES|QL profile on, after its measured runs",
+      {% else %}
       "description": "FROM <source> | LIMIT n | DENSE_VECTOR emb = text | KEEP id, emb for each n in sizes, one client",
+      {% endif %}
       "schedule": [
         {
           "operation": {
@@ -176,9 +181,21 @@
           "clients": 1,
           "warmup-iterations": {{ warmup_iterations | default(2) }},
           "iterations": {{ iterations | default(10) }}
-        }{{ "," if not loop.last }}
+        }{% if with_profile %},
+        {
+          "operation": {
+            "name": "embed-{{ n }}-profile",
+            "operation-type": "esql-profile",
+            "query": "FROM {{ p_from }} | LIMIT {{ n }} | DENSE_VECTOR emb = text WITH {\"inference_id\": \"{{ p_inference_id }}\"} | KEEP id, emb",
+            "request-timeout": {{ request_timeout | default(600) }}
+          },
+          "clients": 1,
+          "warmup-iterations": {{ profile_warmup_iterations | default(warmup_iterations | default(2)) }},
+          "iterations": {{ profile_iterations | default(10) }}
+        }{% endif %}{{ "," if not loop.last }}
         {% endfor %}
       ]
-    }
+    }{{ "," if not loop.last }}
+    {% endfor %}
   ]
 }

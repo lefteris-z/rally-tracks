@@ -20,12 +20,18 @@ NDJSON (`ndjson/msmarco_10k.ndjson`) and Parquet (`parquet/msmarco_10k.parquet`)
 * `source: s3` registers an S3 data source and a dataset on `dataset_resource`, read by the Elasticsearch nodes with
   their instance role (`auth: managed_identity`). The track turns on `esql.external.managed_identity.enabled` first.
 
-### Challenge `embed`
+### Challenge `embed` (default)
 
 1. Raise `esql.command.dense_vector.limit` to the largest size.
 2. Load the index, or register the data source and dataset.
 3. Call the inference endpoint until it answers, so a model deployment is not measured.
 4. `embed-<n>` for each size.
+
+### Challenge `embed-profiled`
+
+The same as `embed`, with an `embed-<n>-profile` task after each `embed-<n>`. It runs the same query with the ES|QL
+profile on (`esql-profile`), so each sample records the time of every driver and operator. Profiled runs are kept
+apart from `embed-<n>` so the profile's own cost does not reach the measured runs.
 
 ### Parameters
 
@@ -33,6 +39,7 @@ NDJSON (`ndjson/msmarco_10k.ndjson`) and Parquet (`parquet/msmarco_10k.parquet`)
 * `inference_id` (default: `.multilingual-e5-small-elasticsearch`): a `text_embedding` inference endpoint
 * `sizes` (default: `[1, 10, 100, 1000, 10000]`): row counts, one task each
 * `warmup_iterations` (default: 2), `iterations` (default: 10)
+* `profile_warmup_iterations` (default: `warmup_iterations`), `profile_iterations` (default: 10): for `embed-<n>-profile`
 * `request_timeout` (default: 600): seconds per `embed-<n>` request
 * `index_name` (default: `msmarco_local`), `bulk_size` (default: 1000), `corpus_base_url` (default: the bucket's `ndjson` prefix)
 * `dataset` (default: `msmarco_s3`), `data_source` (default: `msmarco_src`), `s3_region` (default: `eu-central-1`)
