@@ -89,7 +89,11 @@ accept. After each size, `knn-rows-<n>` records how many rows the filter kept (`
 * `create_e5_endpoint` (default: `true`): create `inference_id` as an e5 endpoint; set `false` to use an existing one
 * `e5_model_id` (default: `.multilingual-e5-small_linux-x86_64`), `e5_num_threads` (default: 1),
   `e5_min_allocations` (default: 0), `e5_max_allocations` (default: 32)
-* `create_endpoint_timeout` (default: `10m`): how long creating the endpoint may wait for the model
+* `create_endpoint_timeout` (default: `5m`), `create_endpoint_request_timeout` (default: 360): how
+  long one attempt at creating the endpoint may wait for the model, on the server and in the client
+* `create_endpoint_retries` (default: 10), `create_endpoint_retry_wait` (default: 30): retries of
+  `create-inference-endpoint`, and the seconds between them. Before each retry the endpoint and the
+  model are deleted, so a failed model download starts over
 * `null_check` (default: `true`): run `null-check-gate` before the first size and `null-check-<n>` after each size
 * `null_check_gate_rows` (default: 100): rows checked by `null-check-gate`
 * `reference_doc_id` (default: `00_0`): the document whose embedding is the reference vector (`cosine-profiled`, `knn-profiled`)

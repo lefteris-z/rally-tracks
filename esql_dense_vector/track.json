@@ -181,13 +181,15 @@
         {
           "operation": {
             "name": "create-inference-endpoint",
-            "operation-type": "raw-request",
-            "method": "PUT",
-            "path": "/_inference/text_embedding/{{ p_inference_id }}",
+            "operation-type": "create-inference-endpoint",
+            "task-type": "text_embedding",
+            "inference-id": "{{ p_inference_id }}",
             "request-params": {
-              "timeout": "{{ create_endpoint_timeout | default('10m') }}"
+              "timeout": "{{ create_endpoint_timeout | default('5m') }}"
             },
-            "request-timeout": 900,
+            "request-timeout": {{ create_endpoint_request_timeout | default(360) }},
+            "retries": {{ create_endpoint_retries | default(10) }},
+            "retry-wait-period": {{ create_endpoint_retry_wait | default(30) }},
             "body": {
               "service": "elasticsearch",
               "service_settings": {

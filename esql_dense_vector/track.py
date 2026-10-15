@@ -91,6 +91,59 @@ class WaitForInferenceEndpoint(runner.Runner):
         return "wait-for-inference-endpoint"
 
 
+class CreateInferenceEndpoint(runner.Runner):
+    """
+    Creates an inference endpoint, and tries again when the creation fails, up to ``retries`` times
+    and ``retry-wait-period`` seconds apart.
+
+    For the ``elasticsearch`` service, creating the endpoint stores it and then downloads and deploys
+    the model, so a failed model download leaves the endpoint and a partly imported model behind.
+    Both are deleted before each new attempt. The client's own retry is off for the creation: it
+    resends the request after a 502, and the second request then fails because the first one already
+    stored the endpoint.
+    """
+
+    async def __call__(self, es, params):
+        params, request_params, transport_params, headers = self._transport_request_params(params)
+        task_type = runner.mandatory(params, "task-type", self)
+        inference_id = runner.mandatory(params, "inference-id", self)
+        body = runner.mandatory(params, "body", self)
+        model_id = body.get("service_settings", {}).get("model_id")
+        retries = params.get("retries", 10)
+        wait_seconds = params.get("retry-wait-period", 30)
+        endpoint_path = f"/_inference/{task_type}/{inference_id}"
+        for attempt in range(retries + 1):
+            try:
+                await es.options(**{**transport_params, "max_retries": 0}).perform_request(
+                    method="PUT", path=endpoint_path, headers=headers or None, body=body, params=request_params
+                )
+                return {"weight": 1, "unit": "ops", "success": True, "attempts": attempt + 1}
+            except Exception as e:
+                if attempt == retries:
+                    raise
+                self.logger.warning(
+                    "Creating inference endpoint [%s] failed (attempt %d of %d): %s. Deleting it and model [%s], retrying in [%s] seconds.",
+                    inference_id,
+                    attempt + 1,
+                    retries + 1,
+                    e,
+                    model_id,
+                    wait_seconds,
+                )
+            cleanup_paths = [endpoint_path] + ([f"/_ml/trained_models/{model_id}"] if model_id else [])
+            for path in cleanup_paths:
+                try:
+                    await es.options(**{**transport_params, "ignore_status": 404}).perform_request(
+                        method="DELETE", path=path, headers=headers or None, params={"force": "true"}
+                    )
+                except Exception as e:
+                    self.logger.warning("Deleting [%s] before the next attempt failed: %s", path, e)
+            await asyncio.sleep(wait_seconds)
+
+    def __repr__(self, *args, **kwargs):
+        return "create-inference-endpoint"
+
+
 class DenseVectorNullCheck(runner.Runner):
     """
     Runs one ES|QL query that embeds the same rows as a measured task and counts the null embeddings,
@@ -232,6 +285,7 @@ class EsqlStatsWithReferenceVector(runner.Runner):
 
 
 def register(registry):
+    registry.register_runner("create-inference-endpoint", CreateInferenceEndpoint(), async_runner=True)
     registry.register_runner("wait-for-inference-endpoint", WaitForInferenceEndpoint(), async_runner=True)
     registry.register_runner("dense-vector-null-check", DenseVectorNullCheck(), async_runner=True)
     registry.register_runner("compute-reference-vector", ComputeReferenceVector(), async_runner=True)
