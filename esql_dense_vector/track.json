@@ -333,7 +333,7 @@
             "operation-type": "esql-stats-with-reference-vector",
             "reference-name": "{{ p_reference_name }}",
             "body": {"pragma": {"knn_runtime_field": true}},
-            "query": "FROM {{ p_from }} | LIMIT {{ n }} | DENSE_VECTOR vec = text WITH {\"inference_id\": \"{{ p_inference_id }}\"} | WHERE knn(vec, __REFERENCE_VECTOR__, {\"similarity\": {{ p_knn_similarity }} }) | STATS returned_rows = COUNT(*)",
+            "query": "FROM {{ p_from }} | LIMIT {{ n }} | DENSE_VECTOR vec = text WITH {\"inference_id\": \"{{ p_inference_id }}\"} | WHERE knn(vec, __REFERENCE_VECTOR__, {\"similarity\": {{ p_knn_similarity }} }) | LIMIT {{ n }} | STATS returned_rows = COUNT(*)",
             "request-timeout": {{ request_timeout | default(600) }}
           },
           "clients": 1,

@@ -81,6 +81,8 @@ run time.
 The knn queries run `knn` on a vector computed at query time. That needs the
 `"pragma": {"knn_runtime_field": true}` request option, which only snapshot builds of Elasticsearch
 accept. After each size, `knn-rows-<n>` records how many rows the filter kept (`returned_rows`).
+Its query puts `LIMIT n` right after `knn`: `knn` needs a LIMIT after it to set its k, and the
+LIMIT that ES|QL adds at the end of a query does not reach `knn` past a `STATS`.
 
 ### Parameters
 
