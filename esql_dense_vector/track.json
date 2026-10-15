@@ -1,6 +1,7 @@
 {% set p_source = source | default("index") %}
 {% set p_sizes = sizes | default([1, 10, 100, 1000, 10000]) %}
-{% set p_inference_id = inference_id | default(".multilingual-e5-small-elasticsearch") %}
+{% set p_inference_id = inference_id | default("esql-dv-benc-e5") %}
+{% set p_create_e5_endpoint = create_e5_endpoint | default(true) %}
 {% set p_index = index_name | default("msmarco_local") %}
 {% set p_dataset = dataset | default("msmarco_s3") %}
 {% set p_data_source = data_source | default("msmarco_src") %}
@@ -153,19 +154,59 @@
           }
         },
         {% endif %}
+        {% if p_create_e5_endpoint %}
+        {
+          "operation": {
+            "name": "delete-inference-endpoint",
+            "operation-type": "raw-request",
+            "method": "DELETE",
+            "path": "/_inference/{{ p_inference_id }}",
+            "request-params": {
+              "force": "true"
+            },
+            "ignore": [404],
+            "include-in-reporting": false
+          }
+        },
+        {
+          "operation": {
+            "name": "create-inference-endpoint",
+            "operation-type": "raw-request",
+            "method": "PUT",
+            "path": "/_inference/text_embedding/{{ p_inference_id }}",
+            "request-params": {
+              "timeout": "{{ create_endpoint_timeout | default('10m') }}"
+            },
+            "request-timeout": 900,
+            "body": {
+              "service": "elasticsearch",
+              "service_settings": {
+                "model_id": "{{ e5_model_id | default('.multilingual-e5-small_linux-x86_64') }}",
+                "num_threads": {{ e5_num_threads | default(1) }},
+                "adaptive_allocations": {
+                  "enabled": true,
+                  "min_number_of_allocations": {{ e5_min_allocations | default(0) }},
+                  "max_number_of_allocations": {{ e5_max_allocations | default(32) }}
+                }
+              },
+              "chunking_settings": {
+                "strategy": "sentence",
+                "max_chunk_size": 250,
+                "sentence_overlap": 1
+              }
+            },
+            "include-in-reporting": false
+          }
+        },
+        {% endif %}
         {
           "operation": {
             "name": "warm-up-inference-endpoint",
-            "operation-type": "retryable-raw-request",
-            "method": "POST",
-            "path": "/_inference/text_embedding/{{ p_inference_id }}",
-            "body": {
-              "input": ["warm up"]
-            },
+            "operation-type": "warm-up-inference-endpoint",
+            "inference-id": "{{ p_inference_id }}",
             "request-timeout": 300,
-            "retries": {{ warm_up_retries | default(60) }},
-            "retry-on-error": true,
-            "retry-wait-period": 10,
+            "retries": {{ warm_up_retries | default(10) }},
+            "retry-wait-period": {{ warm_up_retry_wait | default(30) }},
             "include-in-reporting": false
           }
         },

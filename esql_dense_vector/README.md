@@ -24,8 +24,16 @@ NDJSON (`ndjson/msmarco_10k.ndjson`) and Parquet (`parquet/msmarco_10k.parquet`)
 
 1. Raise `esql.command.dense_vector.limit` to the largest size.
 2. Load the index, or register the data source and dataset.
-3. Call the inference endpoint until it answers, so a model deployment is not measured.
-4. `embed-<n>` for each size.
+3. Create the `inference_id` endpoint, unless `create_e5_endpoint` is `false`. It uses the `elasticsearch`
+   service with e5, the same settings as the default `.multilingual-e5-small-elasticsearch` endpoint:
+   - one thread;
+   - adaptive allocations from 0 to 32;
+   - sentence chunking.
+
+   The model is `.multilingual-e5-small_linux-x86_64`, so the ML nodes must be Linux x86_64. Machine
+   learning must be enabled; with Rally's default car, add the `x-pack-ml` mixin.
+4. Call the endpoint until it answers, so a model deployment is not measured. Every error is retried.
+5. `embed-<n>` for each size.
 
 ### Challenge `embed-profiled`
 
@@ -36,7 +44,11 @@ apart from `embed-<n>` so the profile's own cost does not reach the measured run
 ### Parameters
 
 * `source` (default: `index`): `index` or `s3`
-* `inference_id` (default: `.multilingual-e5-small-elasticsearch`): a `text_embedding` inference endpoint
+* `inference_id` (default: `esql-dv-benc-e5`): the `text_embedding` inference endpoint the queries use
+* `create_e5_endpoint` (default: `true`): create `inference_id` as an e5 endpoint; set `false` to use an existing one
+* `e5_model_id` (default: `.multilingual-e5-small_linux-x86_64`), `e5_num_threads` (default: 1),
+  `e5_min_allocations` (default: 0), `e5_max_allocations` (default: 32)
+* `create_endpoint_timeout` (default: `10m`): how long creating the endpoint may wait for the model
 * `sizes` (default: `[1, 10, 100, 1000, 10000]`): row counts, one task each
 * `warmup_iterations` (default: 2), `iterations` (default: 10)
 * `profile_warmup_iterations` (default: `warmup_iterations`), `profile_iterations` (default: 10): for `embed-<n>-profile`
@@ -44,4 +56,5 @@ apart from `embed-<n>` so the profile's own cost does not reach the measured run
 * `index_name` (default: `msmarco_local`), `bulk_size` (default: 1000), `corpus_base_url` (default: the bucket's `ndjson` prefix)
 * `dataset` (default: `msmarco_s3`), `data_source` (default: `msmarco_src`), `s3_region` (default: `eu-central-1`)
 * `dataset_resource` (default: the Parquet file): the `s3://` URI the dataset reads
-* `warm_up_retries` (default: 60): attempts, 10 seconds apart, for the endpoint warm-up
+* `warm_up_retries` (default: 10), `warm_up_retry_wait` (default: 30): retries of the endpoint warm-up, and the
+  seconds between them
