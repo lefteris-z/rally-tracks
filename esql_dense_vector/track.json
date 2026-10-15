@@ -1,21 +1,46 @@
 {% set p_source = source | default("index") %}
-{% set p_sizes = sizes | default([1, 10, 100, 1000, 10000]) %}
-{% set p_inference_id = inference_id | default("esql-dv-benc-e5") %}
-{% set p_create_e5_endpoint = create_e5_endpoint | default(true) %}
+{% set p_images = (data | default("msmarco")) == "images" %}
+{% set p_sizes = sizes | default([1, 10, 100, 1000] if p_images else [1, 10, 100, 1000, 10000]) %}
+{% set p_inference_id = inference_id | default(".jina-clip-v2" if p_images else "esql-dv-benc-e5") %}
+{% set p_create_e5_endpoint = create_e5_endpoint | default(not p_images) %}
 {% set p_null_check = null_check | default(true) %}
 {% set p_gate_rows = null_check_gate_rows | default(100) %}
-{% set p_index = index_name | default("msmarco_local") %}
-{% set p_dataset = dataset | default("msmarco_s3") %}
-{% set p_data_source = data_source | default("msmarco_src") %}
+{% set p_index = index_name | default("img_local" if p_images else "msmarco_local") %}
+{% set p_dataset = dataset | default("img_s3" if p_images else "msmarco_s3") %}
+{% set p_data_source = data_source | default("img_src" if p_images else "msmarco_src") %}
 {% set p_from = p_index if p_source == "index" else p_dataset %}
-{% set p_reference_doc_id = reference_doc_id | default("00_0") %}
+{% set p_field = "img" if p_images else "text" %}
+{% set p_dv_with = '{\\"inference_id\\": \\"' ~ p_inference_id ~ '\\"' ~ (', \\"type\\": \\"image\\"' if p_images else '') ~ '}' %}
+{% set p_size_overrides = size_overrides | default({}) %}
+{% set p_reference_doc_id = reference_doc_id | default("img_0" if p_images else "00_0") %}
 {% set p_reference_name = p_source ~ "-" ~ p_reference_doc_id %}
 {% set p_reference_min_similarity = reference_min_similarity | default(0.9999) %}
 {% set p_knn_similarity = knn_similarity | default(0.6) %}
 {
   "version": 2,
   "description": "ES|QL DENSE_VECTOR embedding cost over msmarco-v2 passages read from an index or from an S3 dataset",
-  {% if p_source == "index" %}
+  {% if p_source == "index" and p_images %}
+  "indices": [
+    {
+      "name": "{{ p_index }}",
+      "body": "index_images.json"
+    }
+  ],
+  "corpora": [
+    {
+      "name": "images-1k",
+      "base-url": "{{ corpus_base_url | default('s3://lz-esql-dense-vector-eu-central-1/images/1k/ndjson') }}",
+      "documents": [
+        {
+          "source-file": "images_1k.ndjson",
+          "document-count": 1000,
+          "uncompressed-bytes": 523318,
+          "target-index": "{{ p_index }}"
+        }
+      ]
+    }
+  ],
+  {% elif p_source == "index" %}
   "indices": [
     {
       "name": "{{ p_index }}",
@@ -38,7 +63,7 @@
   ],
   {% endif %}
   "challenges": [
-    {% for challenge_name, shape, with_profile in [("embed", "embed", false), ("embed-profiled", "embed", true), ("cosine-profiled", "cosine", true), ("knn-profiled", "knn", true)] %}
+    {% for challenge_name, shape, with_profile in [("embed", "embed", false), ("embed-profiled", "embed", true), ("cosine-profiled", "cosine", true), ("knn-profiled", "knn", true), ("image-profiled", "magnitude", true)] %}
     {
       "name": "{{ challenge_name }}",
       "default": {{ "true" if challenge_name == "embed" else "false" }},
@@ -48,6 +73,8 @@
       "description": "FROM <source> | LIMIT n | DENSE_VECTOR dv = text | EVAL sim = v_cosine(<reference vector>, dv) | KEEP id, sim for each n, with a correctness gate and profiled runs",
       {% elif challenge_name == "knn-profiled" %}
       "description": "FROM <source> | LIMIT n | DENSE_VECTOR vec = text | WHERE knn(vec, <reference vector>, {similarity}) | KEEP id for each n, with a correctness gate, profiled runs and returned-row counts",
+      {% elif challenge_name == "image-profiled" %}
+      "description": "FROM <source> | LIMIT n | DENSE_VECTOR v = img (type image) | EVAL m = v_magnitude(v) | KEEP id, m for each n, with a self-similarity correctness gate and profiled runs; run with data=images",
       {% else %}
       "description": "FROM <source> | LIMIT n | DENSE_VECTOR emb = text | KEEP id, emb for each n in sizes, one client",
       {% endif %}
@@ -155,7 +182,7 @@
             "path": "/_query/dataset/{{ p_dataset }}",
             "body": {
               "data_source": "{{ p_data_source }}",
-              "resource": "{{ dataset_resource | default('s3://lz-esql-dense-vector-eu-central-1/msmarco/10k/parquet/msmarco_10k.parquet') }}",
+              "resource": "{{ dataset_resource | default('s3://lz-esql-dense-vector-eu-central-1/images/1k/parquet/images_1k.parquet' if p_images else 's3://lz-esql-dense-vector-eu-central-1/msmarco/10k/parquet/msmarco_10k.parquet') }}",
               "settings": {
                 "region": "{{ s3_region | default('eu-central-1') }}"
               }
@@ -211,6 +238,29 @@
           }
         },
         {% endif %}
+        {% if p_images %}
+        {
+          "operation": {
+            "name": "configure-ccm",
+            "operation-type": "configure-ccm",
+            "api-key-file": "{{ ccm_api_key_file | default('~/.esql-dense-vector-ccm-api-key') }}",
+            "file-wait-seconds": {{ ccm_api_key_file_wait | default(1800) }},
+            "request-timeout": 120,
+            "include-in-reporting": false
+          }
+        },
+        {
+          "operation": {
+            "name": "wait-for-inference-endpoint",
+            "operation-type": "wait-for-dense-vector",
+            "query": "FROM {{ p_from }} | LIMIT 1 | DENSE_VECTOR emb = {{ p_field }} WITH {{ p_dv_with }} | KEEP emb",
+            "request-timeout": 300,
+            "retries": {{ wait_for_endpoint_retries | default(40) }},
+            "retry-wait-period": {{ wait_for_endpoint_retry_wait | default(30) }},
+            "include-in-reporting": false
+          }
+        },
+        {% else %}
         {
           "operation": {
             "name": "wait-for-inference-endpoint",
@@ -222,12 +272,13 @@
             "include-in-reporting": false
           }
         },
+        {% endif %}
         {% if p_null_check %}
         {
           "operation": {
             "name": "null-check-gate",
             "operation-type": "dense-vector-null-check",
-            "query": "FROM {{ p_from }} | LIMIT {{ p_gate_rows }} | DENSE_VECTOR emb = text WITH {\"inference_id\": \"{{ p_inference_id }}\"} | EVAL is_null = CASE(emb IS NULL, 1, 0) | STATS row_count = COUNT(*), null_count = SUM(is_null)",
+            "query": "FROM {{ p_from }} | LIMIT {{ p_gate_rows }} | DENSE_VECTOR emb = {{ p_field }} WITH {{ p_dv_with }} | EVAL is_null = CASE(emb IS NULL, 1, 0) | STATS row_count = COUNT(*), null_count = SUM(is_null)",
             "expected-rows": {{ p_gate_rows }},
             "request-timeout": {{ request_timeout | default(600) }}
           },
@@ -242,7 +293,7 @@
             "name": "compute-reference-vector",
             "operation-type": "compute-reference-vector",
             "reference-name": "{{ p_reference_name }}",
-            "query": "FROM {{ p_from }} | WHERE id == \"{{ p_reference_doc_id }}\" | DENSE_VECTOR emb = text WITH {\"inference_id\": \"{{ p_inference_id }}\"} | KEEP emb",
+            "query": "FROM {{ p_from }} | WHERE id == \"{{ p_reference_doc_id }}\" | DENSE_VECTOR emb = {{ p_field }} WITH {{ p_dv_with }} | KEEP emb",
             "request-timeout": {{ request_timeout | default(600) }},
             "include-in-reporting": false
           }
@@ -252,15 +303,15 @@
             "name": "correctness-gate",
             "operation-type": "reference-vector-correctness",
             "reference-name": "{{ p_reference_name }}",
-            {% if shape == "cosine" %}
+            {% if shape in ("cosine", "magnitude") %}
             "check": "cosine",
             "min-similarity": {{ p_reference_min_similarity }},
-            "query": "FROM {{ p_from }} | WHERE id == \"{{ p_reference_doc_id }}\" | DENSE_VECTOR dv = text WITH {\"inference_id\": \"{{ p_inference_id }}\"} | EVAL sim = v_cosine(__REFERENCE_VECTOR__, dv) | KEEP id, sim",
+            "query": "FROM {{ p_from }} | WHERE id == \"{{ p_reference_doc_id }}\" | DENSE_VECTOR dv = {{ p_field }} WITH {{ p_dv_with }} | EVAL sim = v_cosine(__REFERENCE_VECTOR__, dv) | KEEP id, sim",
             {% else %}
             "check": "present",
             "expected-id": "{{ p_reference_doc_id }}",
             "body": {"pragma": {"knn_runtime_field": true}},
-            "query": "FROM {{ p_from }} | WHERE id == \"{{ p_reference_doc_id }}\" | DENSE_VECTOR vec = text WITH {\"inference_id\": \"{{ p_inference_id }}\"} | WHERE knn(vec, __REFERENCE_VECTOR__, {\"similarity\": {{ p_knn_similarity }} }) | KEEP id",
+            "query": "FROM {{ p_from }} | WHERE id == \"{{ p_reference_doc_id }}\" | DENSE_VECTOR vec = {{ p_field }} WITH {{ p_dv_with }} | WHERE knn(vec, __REFERENCE_VECTOR__, {\"similarity\": {{ p_knn_similarity }} }) | KEEP id",
             {% endif %}
             "request-timeout": {{ request_timeout | default(600) }}
           },
@@ -270,56 +321,63 @@
         },
         {% endif %}
         {% for n in p_sizes %}
+        {% set runs = p_size_overrides.get(n | string, {}) %}
         {
           "operation": {
             "name": "{{ shape }}-{{ n }}",
             {% if shape == "embed" %}
             "operation-type": "esql",
-            "query": "FROM {{ p_from }} | LIMIT {{ n }} | DENSE_VECTOR emb = text WITH {\"inference_id\": \"{{ p_inference_id }}\"} | KEEP id, emb",
+            "query": "FROM {{ p_from }} | LIMIT {{ n }} | DENSE_VECTOR emb = {{ p_field }} WITH {{ p_dv_with }} | KEEP id, emb",
+            {% elif shape == "magnitude" %}
+            "operation-type": "esql",
+            "query": "FROM {{ p_from }} | LIMIT {{ n }} | DENSE_VECTOR v = {{ p_field }} WITH {{ p_dv_with }} | EVAL m = v_magnitude(v) | KEEP id, m",
             {% elif shape == "cosine" %}
             "operation-type": "esql-with-reference-vector",
             "reference-name": "{{ p_reference_name }}",
-            "query": "FROM {{ p_from }} | LIMIT {{ n }} | DENSE_VECTOR dv = text WITH {\"inference_id\": \"{{ p_inference_id }}\"} | EVAL sim = v_cosine(__REFERENCE_VECTOR__, dv) | KEEP id, sim",
+            "query": "FROM {{ p_from }} | LIMIT {{ n }} | DENSE_VECTOR dv = {{ p_field }} WITH {{ p_dv_with }} | EVAL sim = v_cosine(__REFERENCE_VECTOR__, dv) | KEEP id, sim",
             {% else %}
             "operation-type": "esql-with-reference-vector",
             "reference-name": "{{ p_reference_name }}",
             "body": {"pragma": {"knn_runtime_field": true}},
-            "query": "FROM {{ p_from }} | LIMIT {{ n }} | DENSE_VECTOR vec = text WITH {\"inference_id\": \"{{ p_inference_id }}\"} | WHERE knn(vec, __REFERENCE_VECTOR__, {\"similarity\": {{ p_knn_similarity }} }) | KEEP id",
+            "query": "FROM {{ p_from }} | LIMIT {{ n }} | DENSE_VECTOR vec = {{ p_field }} WITH {{ p_dv_with }} | WHERE knn(vec, __REFERENCE_VECTOR__, {\"similarity\": {{ p_knn_similarity }} }) | KEEP id",
             {% endif %}
             "detailed-results": true,
             "request-timeout": {{ request_timeout | default(600) }}
           },
           "clients": 1,
-          "warmup-iterations": {{ warmup_iterations | default(2) }},
-          "iterations": {{ iterations | default(10) }}
+          "warmup-iterations": {{ runs.get("warmup_iterations", warmup_iterations | default(2)) }},
+          "iterations": {{ runs.get("iterations", iterations | default(10)) }}
         }{% if with_profile %},
         {
           "operation": {
             "name": "{{ shape }}-{{ n }}-profile",
             {% if shape == "embed" %}
             "operation-type": "esql-profile",
-            "query": "FROM {{ p_from }} | LIMIT {{ n }} | DENSE_VECTOR emb = text WITH {\"inference_id\": \"{{ p_inference_id }}\"} | KEEP id, emb",
+            "query": "FROM {{ p_from }} | LIMIT {{ n }} | DENSE_VECTOR emb = {{ p_field }} WITH {{ p_dv_with }} | KEEP id, emb",
+            {% elif shape == "magnitude" %}
+            "operation-type": "esql-profile",
+            "query": "FROM {{ p_from }} | LIMIT {{ n }} | DENSE_VECTOR v = {{ p_field }} WITH {{ p_dv_with }} | EVAL m = v_magnitude(v) | KEEP id, m",
             {% elif shape == "cosine" %}
             "operation-type": "esql-profile-with-reference-vector",
             "reference-name": "{{ p_reference_name }}",
-            "query": "FROM {{ p_from }} | LIMIT {{ n }} | DENSE_VECTOR dv = text WITH {\"inference_id\": \"{{ p_inference_id }}\"} | EVAL sim = v_cosine(__REFERENCE_VECTOR__, dv) | KEEP id, sim",
+            "query": "FROM {{ p_from }} | LIMIT {{ n }} | DENSE_VECTOR dv = {{ p_field }} WITH {{ p_dv_with }} | EVAL sim = v_cosine(__REFERENCE_VECTOR__, dv) | KEEP id, sim",
             {% else %}
             "operation-type": "esql-profile-with-reference-vector",
             "reference-name": "{{ p_reference_name }}",
             "body": {"pragma": {"knn_runtime_field": true}},
-            "query": "FROM {{ p_from }} | LIMIT {{ n }} | DENSE_VECTOR vec = text WITH {\"inference_id\": \"{{ p_inference_id }}\"} | WHERE knn(vec, __REFERENCE_VECTOR__, {\"similarity\": {{ p_knn_similarity }} }) | KEEP id",
+            "query": "FROM {{ p_from }} | LIMIT {{ n }} | DENSE_VECTOR vec = {{ p_field }} WITH {{ p_dv_with }} | WHERE knn(vec, __REFERENCE_VECTOR__, {\"similarity\": {{ p_knn_similarity }} }) | KEEP id",
             {% endif %}
             "request-timeout": {{ request_timeout | default(600) }}
           },
           "clients": 1,
-          "warmup-iterations": {{ profile_warmup_iterations | default(warmup_iterations | default(2)) }},
-          "iterations": {{ profile_iterations | default(10) }}
+          "warmup-iterations": {{ runs.get("profile_warmup_iterations", profile_warmup_iterations | default(warmup_iterations | default(2))) }},
+          "iterations": {{ runs.get("profile_iterations", profile_iterations | default(10)) }}
         }{% endif %}{% if p_null_check %},
         {
           "operation": {
             "name": "null-check-{{ n }}",
             "operation-type": "dense-vector-null-check",
-            "query": "FROM {{ p_from }} | LIMIT {{ n }} | DENSE_VECTOR emb = text WITH {\"inference_id\": \"{{ p_inference_id }}\"} | EVAL is_null = CASE(emb IS NULL, 1, 0) | STATS row_count = COUNT(*), null_count = SUM(is_null)",
+            "query": "FROM {{ p_from }} | LIMIT {{ n }} | DENSE_VECTOR emb = {{ p_field }} WITH {{ p_dv_with }} | EVAL is_null = CASE(emb IS NULL, 1, 0) | STATS row_count = COUNT(*), null_count = SUM(is_null)",
             "expected-rows": {{ n }},
             "request-timeout": {{ request_timeout | default(600) }}
           },
@@ -333,7 +391,7 @@
             "operation-type": "esql-stats-with-reference-vector",
             "reference-name": "{{ p_reference_name }}",
             "body": {"pragma": {"knn_runtime_field": true}},
-            "query": "FROM {{ p_from }} | LIMIT {{ n }} | DENSE_VECTOR vec = text WITH {\"inference_id\": \"{{ p_inference_id }}\"} | WHERE knn(vec, __REFERENCE_VECTOR__, {\"similarity\": {{ p_knn_similarity }} }) | LIMIT {{ n }} | STATS returned_rows = COUNT(*)",
+            "query": "FROM {{ p_from }} | LIMIT {{ n }} | DENSE_VECTOR vec = {{ p_field }} WITH {{ p_dv_with }} | WHERE knn(vec, __REFERENCE_VECTOR__, {\"similarity\": {{ p_knn_similarity }} }) | LIMIT {{ n }} | STATS returned_rows = COUNT(*)",
             "request-timeout": {{ request_timeout | default(600) }}
           },
           "clients": 1,

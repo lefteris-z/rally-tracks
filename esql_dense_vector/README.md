@@ -1,6 +1,7 @@
 ## esql_dense_vector
 
-Measures the ES|QL `DENSE_VECTOR` command embedding msmarco-v2 passages, read either from an index or from an S3 dataset:
+Measures the ES|QL `DENSE_VECTOR` command embedding msmarco-v2 passages, or synthetic images with `data: images`, read
+either from an index or from an S3 dataset:
 
 ```
 FROM <source> | LIMIT n | DENSE_VECTOR emb = text WITH {"inference_id": "<inference_id>"} | KEEP id, emb
@@ -84,6 +85,33 @@ accept. After each size, `knn-rows-<n>` records how many rows the filter kept (`
 Its query puts `LIMIT n` right after `knn`: `knn` needs a LIMIT after it to set its k, and the
 LIMIT that ES|QL adds at the end of a query does not reach `knn` past a `STATS`.
 
+### Challenge `image-profiled` (with `data: images`)
+
+Embeds images through a multimodal endpoint, by default the EIS endpoint `.jina-clip-v2`:
+
+```
+FROM <source> | LIMIT n | DENSE_VECTOR v = img WITH {"inference_id": ".jina-clip-v2", "type": "image"} | EVAL m = v_magnitude(v) | KEEP id, m
+```
+
+The data is 1,000 synthetic 64x64 PNG images (`id`, `img` as a base64 data URI), made by
+`_tools/generate_synthetic_images.py`, in `s3://lz-esql-dense-vector-eu-central-1/images/1k/` as NDJSON
+(`ndjson/images_1k.ndjson`) and Parquet (`parquet/images_1k.parquet`). The index is `img_local` (`index_images.json`)
+and the dataset `img_s3`.
+
+The elasticsearch service on ML nodes embeds text only, so on a self-managed cluster the images go to EIS through
+Cloud Connected Mode:
+
+1. `configure-ccm` reads an Elastic Cloud API key from `ccm_api_key_file` on the load driver and sends it to
+   `PUT _inference/_ccm`. The key is a file, not a track parameter, because Rally stores track parameters with the race
+   and in its log. The file can be written after the race starts; the task waits for it for `ccm_api_key_file_wait`
+   seconds.
+2. `wait-for-inference-endpoint` runs a one-row DENSE_VECTOR query until it returns a vector, as the EIS endpoints
+   appear once EIS has authorized the cluster.
+
+Then the same checks as `cosine-profiled`: `null-check-gate`, `compute-reference-vector` and `correctness-gate`
+(document `img_0` against its own vector). After that, for each size: the measured runs, the profiled runs and
+`null-check-<n>`. `size_overrides` sets other run counts for some sizes, for example fewer runs for 1,000 images.
+
 ### Parameters
 
 * `source` (default: `index`): `index` or `s3`
@@ -96,6 +124,14 @@ LIMIT that ES|QL adds at the end of a query does not reach `knn` past a `STATS`.
 * `create_endpoint_retries` (default: 10), `create_endpoint_retry_wait` (default: 30): retries of
   `create-inference-endpoint`, and the seconds between them. Before each retry the endpoint and the
   model are deleted, so a failed model download starts over
+* `data` (default: `msmarco`): `images` reads the image corpus and changes the defaults of `sizes` (`[1, 10, 100, 1000]`),
+  `inference_id` (`.jina-clip-v2`), `index_name` (`img_local`), `dataset` (`img_s3`), `data_source` (`img_src`),
+  `dataset_resource` (the image Parquet file), `reference_doc_id` (`img_0`), `create_e5_endpoint` (`false`) and
+  `wait_for_endpoint_retries` (40)
+* `ccm_api_key_file` (default: `~/.esql-dense-vector-ccm-api-key`), `ccm_api_key_file_wait` (default: 1800): the file
+  holding the Elastic Cloud API key for `configure-ccm`, and how many seconds to wait for it (`data: images`)
+* `size_overrides` (default: `{}`): per-size run counts, keyed by size, for example
+  `{"1000": {"warmup_iterations": 2, "iterations": 10, "profile_warmup_iterations": 2, "profile_iterations": 3}}`
 * `null_check` (default: `true`): run `null-check-gate` before the first size and `null-check-<n>` after each size
 * `null_check_gate_rows` (default: 100): rows checked by `null-check-gate`
 * `reference_doc_id` (default: `00_0`): the document whose embedding is the reference vector (`cosine-profiled`, `knn-profiled`)

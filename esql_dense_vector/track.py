@@ -144,6 +144,75 @@ class CreateInferenceEndpoint(runner.Runner):
         return "create-inference-endpoint"
 
 
+class ConfigureCCM(runner.Runner):
+    """
+    Connects the cluster to the Elastic Inference Service (Cloud Connected Mode), so that EIS endpoints
+    such as ``.jina-clip-v2`` exist on a self-managed cluster.
+
+    The Elastic Cloud API key is read from ``api-key-file`` on the load driver, not passed as a track
+    parameter: Rally stores track parameters with the race and writes them to its log. The file may be
+    written after the race has started; it is awaited for up to ``file-wait-seconds``. The key is
+    never logged or returned.
+    """
+
+    async def __call__(self, es, params):
+        params, request_params, transport_params, headers = self._transport_request_params(params)
+        path = os.path.expanduser(runner.mandatory(params, "api-key-file", self))
+        wait_seconds = params.get("file-wait-seconds", 1800)
+        waited = 0
+        while not os.path.exists(path):
+            if waited >= wait_seconds:
+                raise FileNotFoundError(f"no CCM API key file [{path}] after {waited} seconds")
+            if waited % 60 == 0:
+                self.logger.info("Waiting for the CCM API key file [%s] (%d of %d seconds)", path, waited, wait_seconds)
+            await asyncio.sleep(10)
+            waited += 10
+        with open(path, encoding="utf-8") as f:
+            api_key = f.read().strip()
+        if not api_key:
+            raise ValueError(f"the CCM API key file [{path}] is empty")
+        await es.options(**transport_params).perform_request(
+            method="PUT", path="/_inference/_ccm", headers=headers or None, body={"api_key": api_key}, params=request_params
+        )
+        self.logger.info("Cloud Connected Mode configured with the key from [%s]", path)
+        return {"weight": 1, "unit": "ops", "success": True, "waited_seconds": waited}
+
+    def __repr__(self, *args, **kwargs):
+        return "configure-ccm"
+
+
+class WaitForDenseVector(runner.Runner):
+    """
+    Runs an ES|QL query until its first value is a non-empty vector, up to ``retries`` times and
+    ``retry-wait-period`` seconds apart, so that measuring starts only once the whole DENSE_VECTOR path
+    works. Used for endpoints that the cluster does not create itself, such as EIS endpoints that
+    appear once the service has authorized the cluster.
+
+    Every error, and every answer without a vector, is retried.
+    """
+
+    async def __call__(self, es, params):
+        retries = params.get("retries", 10)
+        wait_seconds = params.get("retry-wait-period", 30)
+        for attempt in range(retries + 1):
+            try:
+                response = await _run_esql(es, dict(params), self)
+                values = response["values"]
+                if not values or not values[0] or not values[0][0]:
+                    raise ValueError("the query answered without a vector")
+                return {"weight": 1, "unit": "ops", "success": True, "attempts": attempt + 1, "dimensions": len(values[0][0])}
+            except Exception as e:
+                if attempt == retries:
+                    raise
+                self.logger.info(
+                    "DENSE_VECTOR is not ready (attempt %d of %d): %s. Retrying in [%s] seconds.", attempt + 1, retries + 1, e, wait_seconds
+                )
+                await asyncio.sleep(wait_seconds)
+
+    def __repr__(self, *args, **kwargs):
+        return "wait-for-dense-vector"
+
+
 class DenseVectorNullCheck(runner.Runner):
     """
     Runs one ES|QL query that embeds the same rows as a measured task and counts the null embeddings,
@@ -286,7 +355,9 @@ class EsqlStatsWithReferenceVector(runner.Runner):
 
 def register(registry):
     registry.register_runner("create-inference-endpoint", CreateInferenceEndpoint(), async_runner=True)
+    registry.register_runner("configure-ccm", ConfigureCCM(), async_runner=True)
     registry.register_runner("wait-for-inference-endpoint", WaitForInferenceEndpoint(), async_runner=True)
+    registry.register_runner("wait-for-dense-vector", WaitForDenseVector(), async_runner=True)
     registry.register_runner("dense-vector-null-check", DenseVectorNullCheck(), async_runner=True)
     registry.register_runner("compute-reference-vector", ComputeReferenceVector(), async_runner=True)
     registry.register_runner("reference-vector-correctness", ReferenceVectorCorrectness(), async_runner=True)
