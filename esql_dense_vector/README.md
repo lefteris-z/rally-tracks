@@ -32,12 +32,24 @@ NDJSON (`ndjson/msmarco_10k.ndjson`) and Parquet (`parquet/msmarco_10k.parquet`)
 
    The model is `.multilingual-e5-small_linux-x86_64`, so the ML nodes must be Linux x86_64. Machine
    learning must be enabled; with Rally's default car, add the `x-pack-ml` mixin.
-4. Call the endpoint until it answers, so a model deployment is not measured. Every error is retried.
-5. `embed-<n>` for each size.
+4. `wait-for-inference-endpoint`: call the endpoint through `_inference` until it returns a
+   non-empty embedding. Every error, and every answer without an embedding, is retried, so a model
+   that is still deploying or scaling up is waited for, not measured.
+5. `null-check-gate`, unless `null_check` is `false`: once the endpoint is online, one null check of
+   `null_check_gate_rows` rows, before any warm-up or measured run.
+   - It proves that the source, `DENSE_VECTOR` and the endpoint return real vectors for every row.
+   - With `--on-error=abort` a failure stops the race here.
+6. `embed-<n>` for each size, then `null-check-<n>` unless `null_check` is `false`.
+   - `null-check-<n>` runs the same `LIMIT n | DENSE_VECTOR` once, ending in
+     `EVAL is_null = CASE(emb IS NULL, 1, 0) | STATS rows = COUNT(*), nulls = SUM(is_null)`.
+   - It fails the sample, and with `--on-error=abort` the race, when any embedding is null or fewer
+     than `n` rows came back.
+   - The counts are logged to `rally.log` (`DENSE_VECTOR null check: rows=[…] nulls=[…]`) and stored
+     in the sample's metadata (`rows`, `nulls`).
 
 ### Challenge `embed-profiled`
 
-The same as `embed`, with an `embed-<n>-profile` task after each `embed-<n>`. It runs the same query with the ES|QL
+The same as `embed`, with an `embed-<n>-profile` task after each `embed-<n>` (and before its `null-check-<n>`). It runs the same query with the ES|QL
 profile on (`esql-profile`), so each sample records the time of every driver and operator. Profiled runs are kept
 apart from `embed-<n>` so the profile's own cost does not reach the measured runs.
 
@@ -49,6 +61,8 @@ apart from `embed-<n>` so the profile's own cost does not reach the measured run
 * `e5_model_id` (default: `.multilingual-e5-small_linux-x86_64`), `e5_num_threads` (default: 1),
   `e5_min_allocations` (default: 0), `e5_max_allocations` (default: 32)
 * `create_endpoint_timeout` (default: `10m`): how long creating the endpoint may wait for the model
+* `null_check` (default: `true`): run `null-check-gate` before the first size and `null-check-<n>` after each size
+* `null_check_gate_rows` (default: 100): rows checked by `null-check-gate`
 * `sizes` (default: `[1, 10, 100, 1000, 10000]`): row counts, one task each
 * `warmup_iterations` (default: 2), `iterations` (default: 10)
 * `profile_warmup_iterations` (default: `warmup_iterations`), `profile_iterations` (default: 10): for `embed-<n>-profile`
@@ -56,5 +70,5 @@ apart from `embed-<n>` so the profile's own cost does not reach the measured run
 * `index_name` (default: `msmarco_local`), `bulk_size` (default: 1000), `corpus_base_url` (default: the bucket's `ndjson` prefix)
 * `dataset` (default: `msmarco_s3`), `data_source` (default: `msmarco_src`), `s3_region` (default: `eu-central-1`)
 * `dataset_resource` (default: the Parquet file): the `s3://` URI the dataset reads
-* `warm_up_retries` (default: 10), `warm_up_retry_wait` (default: 30): retries of the endpoint warm-up, and the
-  seconds between them
+* `wait_for_endpoint_retries` (default: 10), `wait_for_endpoint_retry_wait` (default: 30): retries of
+  `wait-for-inference-endpoint`, and the seconds between them

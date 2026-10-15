@@ -2,6 +2,8 @@
 {% set p_sizes = sizes | default([1, 10, 100, 1000, 10000]) %}
 {% set p_inference_id = inference_id | default("esql-dv-benc-e5") %}
 {% set p_create_e5_endpoint = create_e5_endpoint | default(true) %}
+{% set p_null_check = null_check | default(true) %}
+{% set p_gate_rows = null_check_gate_rows | default(100) %}
 {% set p_index = index_name | default("msmarco_local") %}
 {% set p_dataset = dataset | default("msmarco_s3") %}
 {% set p_data_source = data_source | default("msmarco_src") %}
@@ -201,15 +203,29 @@
         {% endif %}
         {
           "operation": {
-            "name": "warm-up-inference-endpoint",
-            "operation-type": "warm-up-inference-endpoint",
+            "name": "wait-for-inference-endpoint",
+            "operation-type": "wait-for-inference-endpoint",
             "inference-id": "{{ p_inference_id }}",
             "request-timeout": 300,
-            "retries": {{ warm_up_retries | default(10) }},
-            "retry-wait-period": {{ warm_up_retry_wait | default(30) }},
+            "retries": {{ wait_for_endpoint_retries | default(10) }},
+            "retry-wait-period": {{ wait_for_endpoint_retry_wait | default(30) }},
             "include-in-reporting": false
           }
         },
+        {% if p_null_check %}
+        {
+          "operation": {
+            "name": "null-check-gate",
+            "operation-type": "dense-vector-null-check",
+            "query": "FROM {{ p_from }} | LIMIT {{ p_gate_rows }} | DENSE_VECTOR emb = text WITH {\"inference_id\": \"{{ p_inference_id }}\"} | EVAL is_null = CASE(emb IS NULL, 1, 0) | STATS rows = COUNT(*), nulls = SUM(is_null)",
+            "expected-rows": {{ p_gate_rows }},
+            "request-timeout": {{ request_timeout | default(600) }}
+          },
+          "clients": 1,
+          "warmup-iterations": 0,
+          "iterations": 1
+        },
+        {% endif %}
         {% for n in p_sizes %}
         {
           "operation": {
@@ -233,6 +249,18 @@
           "clients": 1,
           "warmup-iterations": {{ profile_warmup_iterations | default(warmup_iterations | default(2)) }},
           "iterations": {{ profile_iterations | default(10) }}
+        }{% endif %}{% if p_null_check %},
+        {
+          "operation": {
+            "name": "null-check-{{ n }}",
+            "operation-type": "dense-vector-null-check",
+            "query": "FROM {{ p_from }} | LIMIT {{ n }} | DENSE_VECTOR emb = text WITH {\"inference_id\": \"{{ p_inference_id }}\"} | EVAL is_null = CASE(emb IS NULL, 1, 0) | STATS rows = COUNT(*), nulls = SUM(is_null)",
+            "expected-rows": {{ n }},
+            "request-timeout": {{ request_timeout | default(600) }}
+          },
+          "clients": 1,
+          "warmup-iterations": 0,
+          "iterations": 1
         }{% endif %}{{ "," if not loop.last }}
         {% endfor %}
       ]
