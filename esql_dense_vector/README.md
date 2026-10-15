@@ -53,6 +53,35 @@ The same as `embed`, with an `embed-<n>-profile` task after each `embed-<n>` (an
 profile on (`esql-profile`), so each sample records the time of every driver and operator. Profiled runs are kept
 apart from `embed-<n>` so the profile's own cost does not reach the measured runs.
 
+### Challenges `cosine-profiled` and `knn-profiled`
+
+These have the same setup, null checks and profiled runs as `embed-profiled`. The measured query
+compares each row's embedding with a reference vector: the embedding of document `reference_doc_id`
+(default `00_0`).
+
+```
+cosine: FROM <source> | LIMIT n | DENSE_VECTOR dv = text WITH {…} | EVAL sim = v_cosine(<reference>, dv) | KEEP id, sim
+knn:    FROM <source> | LIMIT n | DENSE_VECTOR vec = text WITH {…} | WHERE knn(vec, <reference>, {"similarity": <knn_similarity>}) | KEEP id
+```
+
+After `null-check-gate` and before any warm-up:
+
+1. `compute-reference-vector` embeds the reference document with DENSE_VECTOR itself and stores the
+   vector on the load driver. The queries then use exactly what DENSE_VECTOR produces for that
+   document with this endpoint.
+2. `correctness-gate` runs the query on the reference document alone:
+   - cosine: its `sim` must be at least `reference_min_similarity`;
+   - knn: the query must return exactly that document.
+
+   With `--on-error=abort` a failure stops the race here.
+
+Each measured and profiled task puts the stored vector into its query (`__REFERENCE_VECTOR__`) at
+run time.
+
+The knn queries run `knn` on a vector computed at query time. That needs the
+`"pragma": {"knn_runtime_field": true}` request option, which only snapshot builds of Elasticsearch
+accept. After each size, `knn-rows-<n>` records how many rows the filter kept (`returned_rows`).
+
 ### Parameters
 
 * `source` (default: `index`): `index` or `s3`
@@ -63,6 +92,9 @@ apart from `embed-<n>` so the profile's own cost does not reach the measured run
 * `create_endpoint_timeout` (default: `10m`): how long creating the endpoint may wait for the model
 * `null_check` (default: `true`): run `null-check-gate` before the first size and `null-check-<n>` after each size
 * `null_check_gate_rows` (default: 100): rows checked by `null-check-gate`
+* `reference_doc_id` (default: `00_0`): the document whose embedding is the reference vector (`cosine-profiled`, `knn-profiled`)
+* `reference_min_similarity` (default: 0.9999): the least `sim` the cosine correctness gate accepts
+* `knn_similarity` (default: 0.6): the `similarity` threshold of the knn queries
 * `sizes` (default: `[1, 10, 100, 1000, 10000]`): row counts, one task each
 * `warmup_iterations` (default: 2), `iterations` (default: 10)
 * `profile_warmup_iterations` (default: `warmup_iterations`), `profile_iterations` (default: 10): for `embed-<n>-profile`
