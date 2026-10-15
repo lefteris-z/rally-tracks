@@ -41,7 +41,7 @@ NDJSON (`ndjson/msmarco_10k.ndjson`) and Parquet (`parquet/msmarco_10k.parquet`)
    - With `--on-error=abort` a failure stops the race here.
 6. `embed-<n>` for each size, then `null-check-<n>` unless `null_check` is `false`.
    - `null-check-<n>` runs the same `LIMIT n | DENSE_VECTOR` once, ending in
-     `EVAL is_null = CASE(emb IS NULL, 1, 0) | STATS rows = COUNT(*), nulls = SUM(is_null)`.
+     `EVAL is_null = CASE(emb IS NULL, 1, 0) | STATS row_count = COUNT(*), null_count = SUM(is_null)`.
    - It fails the sample, and with `--on-error=abort` the race, when any embedding is null or fewer
      than `n` rows came back.
    - The counts are logged to `rally.log` (`DENSE_VECTOR null check: rows=[…] nulls=[…]`) and stored

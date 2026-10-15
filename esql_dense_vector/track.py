@@ -55,7 +55,8 @@ class DenseVectorNullCheck(runner.Runner):
     Runs one ES|QL query that embeds the same rows as a measured task and counts the null embeddings,
     so that a run where the endpoint returns nulls cannot pass for a fast one.
 
-    The query must end in ``STATS rows = COUNT(*), nulls = SUM(...)``. The sample fails when any
+    The query must end in ``STATS row_count = COUNT(*), null_count = SUM(...)``; ``nulls`` cannot be
+    used as a column name, as it is an ES|QL keyword (``NULLS FIRST``). The sample fails when any
     embedding is null, or when ``expected-rows`` is set and a different number of rows came back.
     """
 
@@ -73,8 +74,8 @@ class DenseVectorNullCheck(runner.Runner):
         )
         columns = [column["name"] for column in response["columns"]]
         row = dict(zip(columns, response["values"][0])) if response["values"] else {}
-        rows = row.get("rows") or 0
-        nulls = row.get("nulls") or 0
+        rows = row.get("row_count") or 0
+        nulls = row.get("null_count") or 0
         passed = nulls == 0 and (expected_rows is None or rows == expected_rows)
         log = self.logger.info if passed else self.logger.warning
         log("DENSE_VECTOR null check: rows=[%s] nulls=[%s] expected rows=[%s] query=[%s]", rows, nulls, expected_rows, query)
