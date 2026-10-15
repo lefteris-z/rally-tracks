@@ -101,12 +101,20 @@ and the dataset `img_s3`.
 The elasticsearch service on ML nodes embeds text only, so on a self-managed cluster the images go to EIS through
 Cloud Connected Mode:
 
-1. `configure-ccm` reads an Elastic Cloud API key from `ccm_api_key_file` on the load driver and sends it to
-   `PUT _inference/_ccm`. The key is a file, not a track parameter, because Rally stores track parameters with the race
-   and in its log. The file can be written after the race starts; the task waits for it for `ccm_api_key_file_wait`
-   seconds.
+1. `configure-ccm` does what Kibana's Cloud Connect page does. It reads a Cloud Connect API key (role
+   `cloud-connected-admin` for all connected clusters) from `ccm_api_key_file` on the load driver, then:
+   - registers the cluster (UUID, name, version, license) with the Elastic Cloud API at `cloud_api_url`;
+   - enables the `eis` service for that registration, which returns an EIS key;
+   - gives the EIS key to Elasticsearch with `PUT _inference/_ccm`.
+
+   The key is a file, not a track parameter, because Rally stores track parameters with the race and in its log. The
+   file can be written after the race starts; the task waits for it for `ccm_api_key_file_wait` seconds. The Elastic
+   Cloud organization must have accepted the Cloud Connect terms.
 2. `wait-for-inference-endpoint` runs a one-row DENSE_VECTOR query until it returns a vector, as the EIS endpoints
    appear once EIS has authorized the cluster.
+
+The last task, `disconnect-ccm`, deletes the registration. If a race stops before it, the registration stays in the
+organization; its ID is in the `configure-ccm` sample and in `rally.log`.
 
 Then the same checks as `cosine-profiled`: `null-check-gate`, `compute-reference-vector` and `correctness-gate`
 (document `img_0` against its own vector). After that, for each size: the measured runs, the profiled runs and
@@ -129,7 +137,9 @@ Then the same checks as `cosine-profiled`: `null-check-gate`, `compute-reference
   `dataset_resource` (the image Parquet file), `reference_doc_id` (`img_0`), `create_e5_endpoint` (`false`) and
   `wait_for_endpoint_retries` (40)
 * `ccm_api_key_file` (default: `~/.esql-dense-vector-ccm-api-key`), `ccm_api_key_file_wait` (default: 1800): the file
-  holding the Elastic Cloud API key for `configure-ccm`, and how many seconds to wait for it (`data: images`)
+  holding the Cloud Connect API key for `configure-ccm` and `disconnect-ccm`, and how many seconds to wait for it
+  (`data: images`)
+* `cloud_api_url` (default: `https://cloud.elastic.co/api/v1`): the Elastic Cloud API that Cloud Connect registers with
 * `size_overrides` (default: `{}`): per-size run counts, keyed by size, for example
   `{"1000": {"warmup_iterations": 2, "iterations": 10, "profile_warmup_iterations": 2, "profile_iterations": 3}}`
 * `null_check` (default: `true`): run `null-check-gate` before the first size and `null-check-<n>` after each size

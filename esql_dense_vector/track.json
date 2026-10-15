@@ -245,6 +245,7 @@
             "operation-type": "configure-ccm",
             "api-key-file": "{{ ccm_api_key_file | default('~/.esql-dense-vector-ccm-api-key') }}",
             "file-wait-seconds": {{ ccm_api_key_file_wait | default(1800) }},
+            "cloud-api-url": "{{ cloud_api_url | default('https://cloud.elastic.co/api/v1') }}",
             "request-timeout": 120,
             "include-in-reporting": false
           }
@@ -398,7 +399,15 @@
           "warmup-iterations": 0,
           "iterations": 1
         }{% endif %}{{ "," if not loop.last }}
-        {% endfor %}
+        {% endfor %}{% if p_images %},
+        {
+          "operation": {
+            "name": "disconnect-ccm",
+            "operation-type": "disconnect-ccm",
+            "api-key-file": "{{ ccm_api_key_file | default('~/.esql-dense-vector-ccm-api-key') }}",
+            "include-in-reporting": false
+          }
+        }{% endif %}
       ]
     }{{ "," if not loop.last }}
     {% endfor %}

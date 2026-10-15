@@ -2,10 +2,60 @@ import asyncio
 import json
 import os
 import tempfile
+import urllib.error
+import urllib.request
 
 from esrally.driver import runner
 
 REFERENCE_VECTOR_PLACEHOLDER = "__REFERENCE_VECTOR__"
+CLOUD_API_URL = "https://cloud.elastic.co/api/v1"
+
+
+def _cloud_api_request(method, url, api_key, body=None, timeout=60):
+    """Calls the Elastic Cloud API and returns (status, parsed body). Errors are returned, not raised."""
+    request = urllib.request.Request(url, method=method, data=json.dumps(body).encode() if body is not None else None)
+    request.add_header("Authorization", f"apiKey {api_key}")
+    request.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            raw = response.read()
+            status = response.status
+    except urllib.error.HTTPError as e:
+        raw = e.read()
+        status = e.code
+    try:
+        return status, json.loads(raw) if raw else {}
+    except ValueError:
+        return status, {"raw": raw[:500].decode(errors="replace")}
+
+
+async def _cloud_api(method, url, api_key, body=None):
+    status, response = await asyncio.to_thread(_cloud_api_request, method, url, api_key, body)
+    if status >= 300:
+        errors = response.get("errors") if isinstance(response, dict) else None
+        detail = [{k: e.get(k) for k in ("code", "message")} for e in errors] if errors else response
+        raise RuntimeError(f"Elastic Cloud API {method} {url.split('/api/v1', 1)[-1]} returned {status}: {detail}")
+    return response
+
+
+def _ccm_registration_path(cluster_uuid):
+    return os.path.join(tempfile.gettempdir(), f"esql-dense-vector-ccm-{cluster_uuid}.json")
+
+
+async def _read_secret_file(path, wait_seconds, logger, what):
+    waited = 0
+    while not os.path.exists(path):
+        if waited >= wait_seconds:
+            raise FileNotFoundError(f"no {what} file [{path}] after {waited} seconds")
+        if waited % 60 == 0:
+            logger.info("Waiting for the %s file [%s] (%d of %d seconds)", what, path, waited, wait_seconds)
+        await asyncio.sleep(10)
+        waited += 10
+    with open(path, encoding="utf-8") as f:
+        secret = f.read().strip()
+    if not secret:
+        raise ValueError(f"the {what} file [{path}] is empty")
+    return secret, waited
 
 
 def _reference_vector_path(reference_name):
@@ -146,39 +196,102 @@ class CreateInferenceEndpoint(runner.Runner):
 
 class ConfigureCCM(runner.Runner):
     """
-    Connects the cluster to the Elastic Inference Service (Cloud Connected Mode), so that EIS endpoints
-    such as ``.jina-clip-v2`` exist on a self-managed cluster.
+    Connects the cluster to the Elastic Inference Service through Cloud Connect, so that EIS endpoints
+    such as ``.jina-clip-v2`` exist on a self-managed cluster. These are the steps Kibana's Cloud
+    Connect page takes:
 
-    The Elastic Cloud API key is read from ``api-key-file`` on the load driver, not passed as a track
-    parameter: Rally stores track parameters with the race and writes them to its log. The file may be
-    written after the race has started; it is awaited for up to ``file-wait-seconds``. The key is
-    never logged or returned.
+    1. register the cluster (its UUID, name, version and license) with the Elastic Cloud API;
+    2. enable the ``eis`` service for that registration, which returns an EIS key;
+    3. give the EIS key to Elasticsearch with ``PUT _inference/_ccm``.
+
+    The registration ID is written next to the reference vectors, so that ``disconnect-ccm`` can
+    delete the registration at the end of the race.
+
+    The Cloud Connect API key (role ``cloud-connected-admin`` for all connected clusters) is read from
+    ``api-key-file`` on the load driver, not passed as a track parameter: Rally stores track parameters
+    with the race and writes them to its log. The file may be written after the race has started; it
+    is awaited for up to ``file-wait-seconds``. Neither key is logged or returned.
     """
 
     async def __call__(self, es, params):
         params, request_params, transport_params, headers = self._transport_request_params(params)
-        path = os.path.expanduser(runner.mandatory(params, "api-key-file", self))
-        wait_seconds = params.get("file-wait-seconds", 1800)
-        waited = 0
-        while not os.path.exists(path):
-            if waited >= wait_seconds:
-                raise FileNotFoundError(f"no CCM API key file [{path}] after {waited} seconds")
-            if waited % 60 == 0:
-                self.logger.info("Waiting for the CCM API key file [%s] (%d of %d seconds)", path, waited, wait_seconds)
-            await asyncio.sleep(10)
-            waited += 10
-        with open(path, encoding="utf-8") as f:
-            api_key = f.read().strip()
-        if not api_key:
-            raise ValueError(f"the CCM API key file [{path}] is empty")
-        await es.options(**transport_params).perform_request(
-            method="PUT", path="/_inference/_ccm", headers=headers or None, body={"api_key": api_key}, params=request_params
+        api_key, waited = await _read_secret_file(
+            os.path.expanduser(runner.mandatory(params, "api-key-file", self)),
+            params.get("file-wait-seconds", 1800),
+            self.logger,
+            "Cloud Connect API key",
         )
-        self.logger.info("Cloud Connected Mode configured with the key from [%s]", path)
-        return {"weight": 1, "unit": "ops", "success": True, "waited_seconds": waited}
+        cloud_api_url = params.get("cloud-api-url", CLOUD_API_URL)
+        es = es.options(**transport_params)
+        info = await es.perform_request(method="GET", path="/", headers=headers or None)
+        license_info = (await es.perform_request(method="GET", path="/_license", headers=headers or None))["license"]
+        cluster_uuid = info["cluster_uuid"]
+        registration = await _cloud_api(
+            "POST",
+            f"{cloud_api_url}/cloud-connected/clusters",
+            api_key,
+            {
+                "self_managed_cluster": {"id": cluster_uuid, "name": info["cluster_name"], "version": info["version"]["number"]},
+                "license": {"type": license_info["type"], "uid": license_info["uid"]},
+                "name": f"esql-dense-vector-{cluster_uuid}",
+            },
+        )
+        registration_id = registration["id"]
+        with open(_ccm_registration_path(cluster_uuid), "w", encoding="utf-8") as f:
+            json.dump({"id": registration_id, "cloud-api-url": cloud_api_url}, f)
+        self.logger.info("Cluster [%s] registered with Cloud Connect as [%s]", cluster_uuid, registration_id)
+        enabled = await _cloud_api(
+            "PATCH", f"{cloud_api_url}/cloud-connected/clusters/{registration_id}", api_key, {"services": {"eis": {"enabled": True}}}
+        )
+        eis_key = (enabled.get("keys") or {}).get("eis")
+        if not eis_key:
+            raise ValueError(f"enabling EIS for Cloud Connect registration [{registration_id}] returned no EIS key")
+        await es.perform_request(
+            method="PUT", path="/_inference/_ccm", headers=headers or None, body={"api_key": eis_key}, params=request_params
+        )
+        self.logger.info("EIS enabled for Cloud Connect registration [%s] and set in Elasticsearch", registration_id)
+        return {
+            "weight": 1,
+            "unit": "ops",
+            "success": True,
+            "waited_seconds": waited,
+            "cluster_uuid": cluster_uuid,
+            "cloud_connect_id": registration_id,
+        }
 
     def __repr__(self, *args, **kwargs):
         return "configure-ccm"
+
+
+class DisconnectCCM(runner.Runner):
+    """
+    Deletes the Cloud Connect registration that ``configure-ccm`` made for this cluster, as every
+    experiment installs a new cluster and registers it again. It records and does not fail: a
+    registration it cannot delete stays in the Elastic Cloud organization and is logged with its ID.
+    """
+
+    async def __call__(self, es, params):
+        api_key, _ = await _read_secret_file(
+            os.path.expanduser(runner.mandatory(params, "api-key-file", self)), 0, self.logger, "Cloud Connect API key"
+        )
+        cluster_uuid = (await es.perform_request(method="GET", path="/"))["cluster_uuid"]
+        path = _ccm_registration_path(cluster_uuid)
+        if not os.path.exists(path):
+            self.logger.warning("No Cloud Connect registration recorded for cluster [%s]", cluster_uuid)
+            return {"weight": 1, "unit": "ops", "success": True, "deleted": False}
+        with open(path, encoding="utf-8") as f:
+            registration = json.load(f)
+        try:
+            await _cloud_api("DELETE", f"{registration['cloud-api-url']}/cloud-connected/clusters/{registration['id']}", api_key)
+        except Exception as e:
+            self.logger.warning("Cloud Connect registration [%s] was not deleted: %s", registration["id"], e)
+            return {"weight": 1, "unit": "ops", "success": True, "deleted": False, "cloud_connect_id": registration["id"]}
+        os.remove(path)
+        self.logger.info("Cloud Connect registration [%s] deleted", registration["id"])
+        return {"weight": 1, "unit": "ops", "success": True, "deleted": True, "cloud_connect_id": registration["id"]}
+
+    def __repr__(self, *args, **kwargs):
+        return "disconnect-ccm"
 
 
 class WaitForDenseVector(runner.Runner):
@@ -356,6 +469,7 @@ class EsqlStatsWithReferenceVector(runner.Runner):
 def register(registry):
     registry.register_runner("create-inference-endpoint", CreateInferenceEndpoint(), async_runner=True)
     registry.register_runner("configure-ccm", ConfigureCCM(), async_runner=True)
+    registry.register_runner("disconnect-ccm", DisconnectCCM(), async_runner=True)
     registry.register_runner("wait-for-inference-endpoint", WaitForInferenceEndpoint(), async_runner=True)
     registry.register_runner("wait-for-dense-vector", WaitForDenseVector(), async_runner=True)
     registry.register_runner("dense-vector-null-check", DenseVectorNullCheck(), async_runner=True)
