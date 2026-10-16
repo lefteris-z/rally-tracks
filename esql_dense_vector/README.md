@@ -20,6 +20,8 @@ NDJSON (`ndjson/msmarco_10k.ndjson`) and Parquet (`parquet/msmarco_10k.parquet`)
   access to the bucket on the load driver.
 * `source: s3` registers an S3 data source and a dataset on `dataset_resource`, read by the Elasticsearch nodes with
   their instance role (`auth: managed_identity`). The track turns on `esql.external.managed_identity.enabled` first.
+  Where the nodes have no such role, as on serverless, `s3_auth: static_credentials` registers the data source with
+  AWS keys read from `aws_credentials_file` on the load driver instead.
 
 ### Challenge `embed` (default)
 
@@ -158,5 +160,16 @@ Then the same checks as `cosine-profiled`: `null-check-gate`, `compute-reference
 * `index_name` (default: `msmarco_local`), `bulk_size` (default: 1000), `corpus_base_url` (default: the bucket's `ndjson` prefix)
 * `dataset` (default: `msmarco_s3`), `data_source` (default: `msmarco_src`), `s3_region` (default: `eu-central-1`)
 * `dataset_resource` (default: the Parquet file): the `s3://` URI the dataset reads
-* `wait_for_endpoint_retries` (default: 10), `wait_for_endpoint_retry_wait` (default: 30): retries of
-  `wait-for-inference-endpoint`, and the seconds between them
+* `s3_auth` (default: `managed_identity`): how the S3 data source authenticates, `managed_identity` or
+  `static_credentials`
+* `aws_credentials_file` (default: `~/.esql-dense-vector-aws-credentials.json`), `aws_credentials_file_wait` (default:
+  1800): with `s3_auth: static_credentials`, the file on the load driver that holds the output of
+  `aws configure export-credentials --format process`, and the seconds to wait for it. The keys are not a track
+  parameter, as Rally stores track parameters with the race and writes them to its log. Temporary keys stop working
+  when they expire, so the race has to finish before then
+* `number_of_shards` (default: 1), `number_of_replicas` (default: 0): of the index. Set `number_of_replicas: 1` on
+  serverless, where searches are served by replicas on the search nodes
+* `wait_for_endpoint_retries` (default: 10, or 40 with `data: images` or `create_e5_endpoint: false`),
+  `wait_for_endpoint_retry_wait` (default: 30): retries of `wait-for-inference-endpoint`, and the seconds between them.
+  With `data: images` or `create_e5_endpoint: false`, it runs a one-row `DENSE_VECTOR` query until it returns a
+  vector; otherwise it calls the endpoint directly

@@ -8,6 +8,7 @@
 {% set p_index = index_name | default("img_local" if p_images else "msmarco_local") %}
 {% set p_dataset = dataset | default("img_s3" if p_images else "msmarco_s3") %}
 {% set p_data_source = data_source | default("img_src" if p_images else "msmarco_src") %}
+{% set p_s3_auth = s3_auth | default("managed_identity") %}
 {% set p_from = p_index if p_source == "index" else p_dataset %}
 {% set p_field = "img" if p_images else "text" %}
 {% set p_dv_with = '{\\"inference_id\\": \\"' ~ p_inference_id ~ '\\"' ~ (', \\"type\\": \\"image\\"' if p_images else '') ~ '}' %}
@@ -128,6 +129,7 @@
           }
         },
         {% else %}
+        {% if p_s3_auth == "managed_identity" %}
         {
           "operation": {
             "name": "enable-managed-identity",
@@ -139,6 +141,7 @@
             }
           }
         },
+        {% endif %}
         {
           "operation": {
             "name": "delete-dataset",
@@ -159,6 +162,7 @@
             "include-in-reporting": false
           }
         },
+        {% if p_s3_auth == "managed_identity" %}
         {
           "operation": {
             "name": "put-data-source",
@@ -174,6 +178,18 @@
             "include-in-reporting": false
           }
         },
+        {% elif p_s3_auth == "static_credentials" %}
+        {
+          "operation": {
+            "name": "put-data-source",
+            "operation-type": "put-s3-data-source-from-file",
+            "data-source": "{{ p_data_source }}",
+            "credentials-file": "{{ aws_credentials_file | default('~/.esql-dense-vector-aws-credentials.json') }}",
+            "file-wait-seconds": {{ aws_credentials_file_wait | default(1800) }},
+            "include-in-reporting": false
+          }
+        },
+        {% endif %}
         {
           "operation": {
             "name": "put-dataset",
@@ -250,6 +266,8 @@
             "include-in-reporting": false
           }
         },
+        {% endif %}
+        {% if p_images or not p_create_e5_endpoint %}
         {
           "operation": {
             "name": "wait-for-inference-endpoint",

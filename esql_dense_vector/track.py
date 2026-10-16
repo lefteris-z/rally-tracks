@@ -337,6 +337,55 @@ class DisconnectCCM(runner.Runner):
         return "disconnect-ccm"
 
 
+class PutS3DataSourceFromFile(runner.Runner):
+    """
+    Creates an S3 data source with ``static_credentials`` read from ``credentials-file`` on the load
+    driver, the JSON that ``aws configure export-credentials --format process`` prints. It is for
+    clusters whose nodes have no instance role that can read the bucket, such as serverless projects.
+
+    The keys are not a track parameter: Rally stores track parameters with the race and writes them
+    to its log. The file may be written after the race has started; it is awaited for up to
+    ``file-wait-seconds``. No key is logged or returned.
+
+    Temporary keys stop working when they expire, and so do the queries that read the data source.
+    The expiry time is logged and returned.
+    """
+
+    async def __call__(self, es, params):
+        params, request_params, transport_params, headers = self._transport_request_params(params)
+        data_source = runner.mandatory(params, "data-source", self)
+        content, waited = await _read_secret_file(
+            os.path.expanduser(runner.mandatory(params, "credentials-file", self)),
+            params.get("file-wait-seconds", 1800),
+            self.logger,
+            "AWS credentials",
+        )
+        try:
+            credentials = json.loads(content)
+            settings = {
+                "auth": "static_credentials",
+                "access_key": credentials["AccessKeyId"],
+                "secret_key": credentials["SecretAccessKey"],
+            }
+        except (ValueError, KeyError, TypeError):
+            raise ValueError("the AWS credentials file needs the JSON of [aws configure export-credentials --format process]") from None
+        if credentials.get("SessionToken"):
+            settings["session_token"] = credentials["SessionToken"]
+        expiration = credentials.get("Expiration")
+        await es.options(**transport_params).perform_request(
+            method="PUT",
+            path=f"/_query/data_source/{data_source}",
+            headers=headers or None,
+            body={"type": "s3", "settings": settings},
+            params=request_params,
+        )
+        self.logger.info("S3 data source [%s] created with static credentials that expire at [%s]", data_source, expiration)
+        return {"weight": 1, "unit": "ops", "success": True, "waited_seconds": waited, "credentials_expiration": expiration}
+
+    def __repr__(self, *args, **kwargs):
+        return "put-s3-data-source-from-file"
+
+
 class WaitForDenseVector(runner.Runner):
     """
     Runs an ES|QL query until its first value is a non-empty vector, up to ``retries`` times and
@@ -529,6 +578,7 @@ def register(registry):
     registry.register_runner("create-inference-endpoint", CreateInferenceEndpoint(), async_runner=True)
     registry.register_runner("configure-ccm", ConfigureCCM(), async_runner=True)
     registry.register_runner("disconnect-ccm", DisconnectCCM(), async_runner=True)
+    registry.register_runner("put-s3-data-source-from-file", PutS3DataSourceFromFile(), async_runner=True)
     registry.register_runner("wait-for-inference-endpoint", WaitForInferenceEndpoint(), async_runner=True)
     registry.register_runner("wait-for-dense-vector", WaitForDenseVector(), async_runner=True)
     registry.register_runner("dense-vector-null-check", DenseVectorNullCheck(), async_runner=True)
