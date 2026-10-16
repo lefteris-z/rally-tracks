@@ -81,9 +81,11 @@ After `null-check-gate` and before any warm-up:
 Each measured and profiled task puts the stored vector into its query (`__REFERENCE_VECTOR__`) at
 run time.
 
-The knn queries run `knn` on a vector computed at query time. That needs the
-`"pragma": {"knn_runtime_field": true}` request option, which only snapshot builds of Elasticsearch
-accept. After each size, `knn-rows-<n>` records how many rows the filter kept (`returned_rows`).
+The knn queries run `knn` on a vector computed at query time. Before
+[elastic/elasticsearch#161205](https://github.com/elastic/elasticsearch/pull/161205) that needs a
+snapshot build and the `"pragma": {"knn_runtime_field": true}` request option, which the track
+sends by default. From that change on, the pragma no longer exists and a release build rejects any
+pragma, so set `knn_pragma: false` there. After each size, `knn-rows-<n>` records how many rows the filter kept (`returned_rows`).
 Its query puts `LIMIT n` right after `knn`: `knn` needs a LIMIT after it to set its k, and the
 LIMIT that ES|QL adds at the end of a query does not reach `knn` past a `STATS`.
 
@@ -153,6 +155,8 @@ Then the same checks as `cosine-profiled`: `null-check-gate`, `compute-reference
 * `reference_doc_id` (default: `00_0`): the document whose embedding is the reference vector (`cosine-profiled`, `knn-profiled`)
 * `reference_min_similarity` (default: 0.9999): the least `sim` the cosine correctness gate accepts
 * `knn_similarity` (default: 0.6): the `similarity` threshold of the knn queries
+* `knn_pragma` (default: `true`): send the `knn_runtime_field` pragma with the knn queries; `false` for
+  builds that include elastic/elasticsearch#161205
 * `sizes` (default: `[1, 10, 100, 1000, 10000]`): row counts, one task each
 * `warmup_iterations` (default: 2), `iterations` (default: 10)
 * `profile_warmup_iterations` (default: `warmup_iterations`), `profile_iterations` (default: 10): for `embed-<n>-profile`

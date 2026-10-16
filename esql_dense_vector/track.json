@@ -17,6 +17,7 @@
 {% set p_reference_name = p_source ~ "-" ~ p_reference_doc_id %}
 {% set p_reference_min_similarity = reference_min_similarity | default(0.9999) %}
 {% set p_knn_similarity = knn_similarity | default(0.6) %}
+{% set p_knn_pragma = knn_pragma | default(true) %}
 {
   "version": 2,
   "description": "ES|QL DENSE_VECTOR embedding cost over msmarco-v2 passages read from an index or from an S3 dataset",
@@ -329,7 +330,7 @@
             {% else %}
             "check": "present",
             "expected-id": "{{ p_reference_doc_id }}",
-            "body": {"pragma": {"knn_runtime_field": true}},
+            {% if p_knn_pragma %}"body": {"pragma": {"knn_runtime_field": true}},{% endif %}
             "query": "FROM {{ p_from }} | WHERE id == \"{{ p_reference_doc_id }}\" | DENSE_VECTOR vec = {{ p_field }} WITH {{ p_dv_with }} | WHERE knn(vec, __REFERENCE_VECTOR__, {\"similarity\": {{ p_knn_similarity }} }) | KEEP id",
             {% endif %}
             "request-timeout": {{ request_timeout | default(600) }}
@@ -357,7 +358,7 @@
             {% else %}
             "operation-type": "esql-with-reference-vector",
             "reference-name": "{{ p_reference_name }}",
-            "body": {"pragma": {"knn_runtime_field": true}},
+            {% if p_knn_pragma %}"body": {"pragma": {"knn_runtime_field": true}},{% endif %}
             "query": "FROM {{ p_from }} | LIMIT {{ n }} | DENSE_VECTOR vec = {{ p_field }} WITH {{ p_dv_with }} | WHERE knn(vec, __REFERENCE_VECTOR__, {\"similarity\": {{ p_knn_similarity }} }) | KEEP id",
             {% endif %}
             "detailed-results": true,
@@ -383,7 +384,7 @@
             {% else %}
             "operation-type": "esql-profile-with-reference-vector",
             "reference-name": "{{ p_reference_name }}",
-            "body": {"pragma": {"knn_runtime_field": true}},
+            {% if p_knn_pragma %}"body": {"pragma": {"knn_runtime_field": true}},{% endif %}
             "query": "FROM {{ p_from }} | LIMIT {{ n }} | DENSE_VECTOR vec = {{ p_field }} WITH {{ p_dv_with }} | WHERE knn(vec, __REFERENCE_VECTOR__, {\"similarity\": {{ p_knn_similarity }} }) | KEEP id",
             {% endif %}
             "request-timeout": {{ request_timeout | default(600) }}
@@ -409,7 +410,7 @@
             "name": "knn-rows-{{ n }}",
             "operation-type": "esql-stats-with-reference-vector",
             "reference-name": "{{ p_reference_name }}",
-            "body": {"pragma": {"knn_runtime_field": true}},
+            {% if p_knn_pragma %}"body": {"pragma": {"knn_runtime_field": true}},{% endif %}
             "query": "FROM {{ p_from }} | LIMIT {{ n }} | DENSE_VECTOR vec = {{ p_field }} WITH {{ p_dv_with }} | WHERE knn(vec, __REFERENCE_VECTOR__, {\"similarity\": {{ p_knn_similarity }} }) | LIMIT {{ n }} | STATS returned_rows = COUNT(*)",
             "request-timeout": {{ request_timeout | default(600) }}
           },
