@@ -116,6 +116,10 @@ Cloud Connected Mode:
 The last task, `disconnect-ccm`, deletes the registration. If a race stops before it, the registration stays in the
 organization; its ID is in the `configure-ccm` sample and in `rally.log`.
 
+Every null check also records the ES|QL warnings of its response (`warnings`, `warning_count` in the sample, and one
+`DENSE_VECTOR null check warning` line each in `rally.log`). When an embedding fails, ES|QL returns null and says why
+only in these warnings.
+
 Then the same checks as `cosine-profiled`: `null-check-gate`, `compute-reference-vector` and `correctness-gate`
 (document `img_0` against its own vector). After that, for each size: the measured runs, the profiled runs and
 `null-check-<n>`. `size_overrides` sets other run counts for some sizes, for example fewer runs for 1,000 images.

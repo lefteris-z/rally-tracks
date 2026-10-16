@@ -1,10 +1,14 @@
 import asyncio
+import contextlib
 import json
 import os
+import re
 import tempfile
 import urllib.error
 import urllib.request
 
+import elastic_transport._node._http_aiohttp as _aiohttp_node
+from elastic_transport import HttpHeaders
 from esrally.driver import runner
 
 REFERENCE_VECTOR_PLACEHOLDER = "__REFERENCE_VECTOR__"
@@ -36,6 +40,45 @@ async def _cloud_api(method, url, api_key, body=None):
         detail = [{k: e.get(k) for k in ("code", "message")} for e in errors] if errors else response
         raise RuntimeError(f"Elastic Cloud API {method} {url.split('/api/v1', 1)[-1]} returned {status}: {detail}")
     return response
+
+
+class _AllValuesHttpHeaders(HttpHeaders):
+    """HttpHeaders that keeps every value of a repeated header, joined by ", ". HttpHeaders keeps only the first."""
+
+    def __init__(self, initial=None):
+        super().__init__()
+        if initial is not None:
+            for key, value in initial.items() if hasattr(initial, "items") else initial:
+                existing = self.get(key)
+                self[key] = value if existing is None else f"{existing}, {value}"
+
+
+@contextlib.contextmanager
+def _all_header_values():
+    """
+    Keeps every ``Warning`` header of the responses received inside the block. ES|QL sends one header
+    per warning, and the first one is usually the generic "treating result as null"; the error that
+    caused it comes in the next ones.
+    """
+    original = _aiohttp_node.HttpHeaders
+    _aiohttp_node.HttpHeaders = _AllValuesHttpHeaders
+    try:
+        yield
+    finally:
+        _aiohttp_node.HttpHeaders = original
+
+
+_WARNING_TEXT = re.compile(r'"((?:[^"\\]|\\.)*)"')
+
+
+def _esql_warnings(response, limit=20, max_length=500):
+    """The distinct texts of the ``Warning`` headers of an ES|QL response, where ES|QL explains values it turned into nulls."""
+    headers = getattr(getattr(response, "meta", None), "headers", None) or {}
+    raw = headers.get("Warning")
+    if not raw:
+        return []
+    texts = [m.group(1).replace('\\"', '"')[:max_length] for m in _WARNING_TEXT.finditer(raw)]
+    return list(dict.fromkeys(texts))[:limit]
 
 
 def _ccm_registration_path(cluster_uuid):
@@ -334,6 +377,9 @@ class DenseVectorNullCheck(runner.Runner):
     The query must end in ``STATS row_count = COUNT(*), null_count = SUM(...)``; ``nulls`` cannot be
     used as a column name, as it is an ES|QL keyword (``NULLS FIRST``). The sample fails when any
     embedding is null, or when ``expected-rows`` is set and a different number of rows came back.
+
+    The ES|QL warnings of the response, which say why embeddings were null, are logged and stored in
+    the sample's metadata (``warnings``, ``warning_count``).
     """
 
     async def __call__(self, es, params):
@@ -341,13 +387,15 @@ class DenseVectorNullCheck(runner.Runner):
         es = es.options(**transport_params)
         query = runner.mandatory(params, "query", self)
         expected_rows = params.get("expected-rows")
-        response = await es.perform_request(
-            method="POST",
-            path="/_query",
-            headers=headers or None,
-            body={"query": query},
-            params=request_params,
-        )
+        with _all_header_values():
+            response = await es.perform_request(
+                method="POST",
+                path="/_query",
+                headers=headers or None,
+                body={"query": query},
+                params=request_params,
+            )
+        warnings = _esql_warnings(response)
         columns = [column["name"] for column in response["columns"]]
         row = dict(zip(columns, response["values"][0])) if response["values"] else {}
         rows = row.get("row_count") or 0
@@ -355,7 +403,18 @@ class DenseVectorNullCheck(runner.Runner):
         passed = nulls == 0 and (expected_rows is None or rows == expected_rows)
         log = self.logger.info if passed else self.logger.warning
         log("DENSE_VECTOR null check: rows=[%s] nulls=[%s] expected rows=[%s] query=[%s]", rows, nulls, expected_rows, query)
-        result = {"weight": 1, "unit": "ops", "success": passed, "rows": rows, "nulls": nulls, "expected_rows": expected_rows}
+        for warning in warnings:
+            self.logger.warning("DENSE_VECTOR null check warning: %s", warning)
+        result = {
+            "weight": 1,
+            "unit": "ops",
+            "success": passed,
+            "rows": rows,
+            "nulls": nulls,
+            "expected_rows": expected_rows,
+            "warning_count": len(warnings),
+            "warnings": warnings,
+        }
         if not passed:
             result["error-type"] = "null-check"
             result["error-description"] = f"{nulls} null embeddings in {rows} rows (expected {expected_rows} rows)"
