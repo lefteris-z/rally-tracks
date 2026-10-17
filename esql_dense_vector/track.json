@@ -3,6 +3,7 @@
 {% set p_sizes = sizes | default([1, 10, 100, 1000] if p_images else [1, 10, 100, 1000, 10000]) %}
 {% set p_inference_id = inference_id | default(".jina-clip-v2" if p_images else "esql-dv-benc-e5") %}
 {% set p_create_e5_endpoint = create_e5_endpoint | default(not p_images) %}
+{% set p_ccm = ccm | default(p_images) %}
 {% set p_null_check = null_check | default(true) %}
 {% set p_gate_rows = null_check_gate_rows | default(100) %}
 {% set p_index = index_name | default("img_local" if p_images else "msmarco_local") %}
@@ -255,7 +256,7 @@
           }
         },
         {% endif %}
-        {% if p_images %}
+        {% if p_ccm %}
         {
           "operation": {
             "name": "configure-ccm",
@@ -418,7 +419,7 @@
           "warmup-iterations": 0,
           "iterations": 1
         }{% endif %}{{ "," if not loop.last }}
-        {% endfor %}{% if p_images %},
+        {% endfor %}{% if p_ccm %},
         {
           "operation": {
             "name": "disconnect-ccm",

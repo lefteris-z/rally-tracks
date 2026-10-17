@@ -103,7 +103,7 @@ The data is 1,000 synthetic 64x64 PNG images (`id`, `img` as a base64 data URI),
 and the dataset `img_s3`.
 
 The elasticsearch service on ML nodes embeds text only, so on a self-managed cluster the images go to EIS through
-Cloud Connected Mode:
+Cloud Connected Mode. A serverless project reaches EIS without it; set `ccm: false` there to skip both steps:
 
 1. `configure-ccm` does what Kibana's Cloud Connect page does. It reads a Cloud Connect API key (role
    `cloud-connected-admin` for all connected clusters) from `ccm_api_key_file` on the load driver, then:
@@ -144,6 +144,7 @@ Then the same checks as `cosine-profiled`: `null-check-gate`, `compute-reference
   `inference_id` (`.jina-clip-v2`), `index_name` (`img_local`), `dataset` (`img_s3`), `data_source` (`img_src`),
   `dataset_resource` (the image Parquet file), `reference_doc_id` (`img_0`), `create_e5_endpoint` (`false`) and
   `wait_for_endpoint_retries` (40)
+* `ccm` (default: `true` with `data: images`, otherwise `false`): run `configure-ccm` and `disconnect-ccm`
 * `ccm_api_key_file` (default: `~/.esql-dense-vector-ccm-api-key`), `ccm_api_key_file_wait` (default: 1800): the file
   holding the Cloud Connect API key for `configure-ccm` and `disconnect-ccm`, and how many seconds to wait for it
   (`data: images`)
